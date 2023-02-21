@@ -1,0 +1,652 @@
+== 进入原始模式
+
+> 规范模式: canonical mode
+.
+> 原始模式: raw mode
+
+让我们尝试读取用户的按键操作.
+
+.第 3 步: kilo.c
+[%linenums, c, highlight="1,4..5"]
+----
+#include <unistd.h>
+
+int main() {
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1);
+
+  return 0;
+}
+----
+
+`read()` 和 `STDIN_FILENO` 来自 `<unistd.h>` . 我们要求 `read()` 从标准输入中读取 `1` 个字节到变量 `c` 中, 并一直这样做直到没有更多的字节可读. `read()` 返回它读取的字节数, 并在到达文件末尾时返回 `0`.
+
+当运行 `./kilo` 时, 终端会连接到标准输入, 因此键盘的输入会被读取到变量 `c` 中. 但是, 默认情况下终端以 **规范模式** 启动, 也称为 **熟化模式**. 在此模式下, 键盘输入仅在用户按下 **回车键** 时发送到我们的程序. 这对许多程序都很有用: 它允许用户输入一行文本, 这样可以使用 **退格键** 来修复错误, 直到文本完全按照想要的方式输入, 最后按 **回车键** 将其发送到程序. 但它不适用于具有更复杂用户界面的程序, 如文本编辑器. 我们希望在每个按键输入时都对其进行处理, 以便我们可以立即做出响应.
+
+我们想要的是 **原始模式**. 不幸的是, 没有简单的开关可以将终端设置为原始模式. 原始模式是通过关闭终端中的许多标志位来实现的, 我们将在本章的过程中逐渐做到这一点.
+
+要退出上述程序, 请按 `Ctrl-D` 以告知 `read()` 它已到达文件末尾. 或者我们始终可以按 `Ctrl-C` 以发出立即终止进程的信号.
+
+=== 按下 `q` 退出.
+
+为了演示规范模式是如何工作的, 我们将让程序在读取到用户的 `q` 按键操作时退出.
+
+.第 4 步: kilo.c
+[%linenums, c, highlight=5]
+----
+#include <unistd.h>
+
+int main() {
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q');
+
+  return 0;
+}
+----
+
+要退出程序, 必须键入一行包含 `q` 的文本, 然后按回车键. 程序将一次一个字符地快速读取文本行, 直到读取到 `q` , 此时 `while` 循环将停止且程序将退出. `q` 之后的任何字符都将在输入队列中保持未读状态, 你可能会在程序退出后看到该输入被送入你的 `shell`.
+
+=== 关闭回显(echo)
+
+我们可以通过以下方式设置终端的属性.
+
+1. 使用 `tcgetattr()` 将当前属性读入结构体 `raw`.
+2. 手动修改结构体 `raw`.
+3. 将修改后的结构体 `raw` 传递给 `tcsetattr()` 以写回新的终端属性. 让我们尝试以这种方式关闭 `ECHO` 功能.
+
+.第 5 步: kilo.c
+[%linenums, c, highlight="1,4..12,15"]
+----
+#include <termios.h>
+#include <unistd.h>
+
+void enableRawMode() {
+  struct termios raw;
+
+  tcgetattr(STDIN_FILENO, &raw);
+
+  raw.c_lflag &= ~(ECHO);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() {
+  enableRawMode();
+
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q');
+  return 0;
+}
+----
+
+`struct termios`, `tcgetattr()`, `tcsetattr()`, `ECHO`, `TCSAFLUSH` 都来自 `<termios.h>`.
+
+`ECHO` 的功能是使你键入的每个键都打印到终端, 因此你可以看到你正在键入的内容. 这在规范模式下很有用, 但当我们试图在原始模式下仔细呈现用户界面时, 它确实会妨碍我们. 所以我们关掉它. 该程序与上一步中的程序执行相同的操作, 只是不打印你输入的内容. 如果你曾经不得不在终端输入密码, 例如在使用 `sudo` 时, 你可能会熟悉这种模式.
+
+程序退出后, 在你的 `shell` 里面, 你可能会发现你的终端仍然没有回显你键入的内容. 别担心, 它仍然会监听你输入的内容. 只需按 `Ctrl-C` 开始新的一行输入到你的 `shell`, 然后输入 `reset` 并按回车键. 在大多数情况下, 这会将你的终端重置为正常. 如果失败, 你可以随时重新启动终端仿真器. 我们将在下一步中解决整个问题.
+
+`termios` 可以通过 `tcgetattr()` 将终端属性读入结构体 `raw`. 修改它们之后, 你可以使用 `tcsetattr()` 将它们应用到终端. `TCSAFLUSH` 参数指定何时应用更改: 在这种情况下, 它等待所有待处理的输出被写入终端, 并丢弃任何尚未读取的输入.
+
+`c_lflag` 字段用于"本地标志位". MacOS 中的 `<termios.h>` 有一条注释将其描述为"保存其它状态的地方". 所以也许它应该被认为是"杂项标志位". 其他标志位字段是 `c_iflag`(输入标志位), `c_oflag`(输出标志位)和 `c_cflag`(控制标志位), 所有这些我们都必须修改以启用原始模式.
+
+`ECHO` 是一个 `bitflag`, 二进制表示是: `00000000000000000000000000001000`. 我们对该值使用按位非运算符(`~`)来获取 `11111111111111111111111111110111`. 然后我们将该值与标志位字段按位与, 这会强制标志位字段中的第四位变为 `0`, 并导致每隔一位保留其当前值. 像这样翻转位在 `C` 语言中很常见.
+
+=== 退出时禁用原始模式
+
+让我们善待用户, 并在我们的程序退出时恢复他们终端的原始属性. 我们使用变量 `orig_termios` 来保存终端的原始属性, 并在程序退出时用于将其应用于终端.
+
+.第 6 步: kilo.c
+[%linenums, c, highlight="1,5..9,12..15"]
+----
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() {
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios);
+}
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_lflag &= ~(ECHO);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+=== 关闭规范模式
+
+有一个 `ICANON` 标志位允许我们关闭规范模式. 这意味着我们最终将逐字节读取输入, 而不是逐行读取.
+
+.第 7 步: kilo.c
+[%linenums, c, highlight=13]
+----
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+  struct termios raw = orig_termios;
+  raw.c_lflag &= ~(ECHO | ICANON);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`ICANON` 来自 `<termios.h>`. 输入标志位(`c_iflag` 中的标志位)通常以 `I` 开始, 例如 `ICANON`. 但是,  `ICANON` 不是输入标志位, 它是 `c_lflag` 字段中的"本地"标志位. 所以这很令人困惑.
+
+现在程序将在你按下 `q` 时立即退出.
+
+=== 显示按键
+
+为了更好地了解原始模式下的输入是如何工作的, 让我们在 `read()` 时, 打印出我们输入的每个字节. 我们将打印每个字符的 `ASCII` 值, 以及它所代表的字符(如果它是可打印字符).
+
+.第 8 步: kilo.c
+[%linenums, c, highlight="1..2,17..23"]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int main() {
+  enableRawMode();
+
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q') {
+    if (iscntrl(c)) {
+      printf("%d\n", c);
+    } else {
+      printf("%d ('%c')\n", c, c);
+    }
+  }
+
+  return 0;
+}
+----
+
+`iscntrl()` 来自 `<ctype.h>`, `printf()` 来自 `<stdio.h>`.
+
+`iscntrl()` 测试一个字符是否是一个控制字符. 控制字符是我们不想打印到屏幕上的不可打印字符. `ASCII` 码 `0-31` 都是控制字符, `127` 也是控制字符. `ASCII` 码 `32-126` 都是可打印的. (查看 `ASCII` 表以查看所有字符.)
+
+`printf()` 可以打印一个字节的多种表示形式. `%d` 告诉它将字节格式化为十进制数(它的 `ASCII` 码), `%c` 告诉它直接将字节作为一个字符输出.
+
+这是一个非常有用的程序. 它向我们展示了各种按键如何转换为我们读取的字节. 大多数普通按键直接转换为它们所代表的字符. 但是试着看看当你按下 `方向键` 或者 `退出键`, 或者 `Page Up`, 或者 `Page Down`, 或者 `Home`, 或者`End`, 或者 `退格键`,  `删除键`, 或者 `回车键` 时会发生什么. 尝试使用带有 `Ctrl` 的组合键, 例如 `Ctrl-A`, `Ctrl-B` 等组合键.
+
+你会注意到一些有趣的事情.
+
+- 方向键, `Page Up`, `Page Down`, `Home` 和 `End` 会向终端输入 `3` 或 `4` 个字节: `27`, `'['`, 然后是其他一两个字符. 这称为转义序列. 所有转义序列都以一个字节 `27` 开头. 按下 `退出键` 发送一个 `27` 字节作为输入.
+- `退格键` 是字节 `127`. `Delete` 键是一个 `4` 字节的转义序列.
+- `回车键` 是字节 `10`, 这是一个换行符, 也称为 `'\n'`.
+- `Ctrl-A` 是 `1`, `Ctrl-B` 是 `2`, `Ctrl-C` 是...哦, 那程序就终止了, 对吧. 但 `Ctrl` 组合键似乎确实将字母 `A-Z` 映射到了代码 `1-26`.
+
+顺便说一句, 如果你碰巧按下 `Ctrl-S`, 你可能会发现你的程序似乎被冻结了. 你所做的是你已经要求你的程序停止向你发送输出. 按 `Ctrl-Q` 告诉它继续向你发送输出.
+
+此外, 如果你按下 `Ctrl-Z`(或可能 `Ctrl-Y`), 你的程序将暂停到后台. 运行 `fg` 命令将其带回前台. (它可能会在你这样做之后立即退出, 因为 `read()` 返回 `-1` 表明发生了错误. 这发生在 MacOS 上, 而 Linux 的 `read()` 似乎能够正常恢复调用.)
+
+=== 关闭 `Ctrl-C` 和 `Ctrl-Z` 信号
+
+默认情况下, `Ctrl-C` 会向当前进程发送 `SIGINT` 信号使其终止, 并向当前进程 `Ctrl-Z` 发送 `SIGTSTP` 信号使其挂起. 让我们关闭这两个信号的发送.
+
+.第 9 步: kilo.c
+[%linenums, c, highlight=15]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+  struct termios raw = orig_termios;
+  raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`ISIG` 来自 `<termios.h>`. 就像 `ICANON`, 它以 `I` 但不是输入标志位的开头.
+
+现在按下 `Ctrl-C` 可以按字节读取 `3`, 按下 `Ctrl-Z` 也可以按字节读取 `26`.
+
+这也会使 `Ctrl-Y` 在 MacOS 上禁用, 就像 `Ctrl-Z` 一样, 只不过它在暂停之前会等待程序读取的输入.
+
+=== 禁用 `Ctrl-S` 和 `Ctrl-Q`
+
+默认情况下, `Ctrl-S` 和 `Ctrl-Q` 用来控制软件流. `Ctrl-S` 会停止将数据传输到终端, 直到你按下 `Ctrl-Q`. 这起源于很久之前, 在那时你可能想要暂停数据传输以使打印机等设备赶上来. 让我们关闭该功能.
+
+.第 10 步: kilo.c
+[%linenums, c, highlight=16]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(IXON);
+  raw.c_lflag &= ~(ECHO | ICANON | ISIG);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`IXON` 来自 `<termios.h>`. `I` 这次真的代表"输入标志位"(和我们之前看到的其他标志位不同). `XON` 来自两个控制字符 `Ctrl-S` 和 `Ctrl-Q` 产生的名字: `XOFF` 负责暂停传输, `XON` 负责重启传输.
+
+现在 `Ctrl-S` 可以按字节读取 `19`, `Ctrl-Q` 也可以按字节读取 `17`.
+
+=== 禁用 `Ctrl-V`
+
+在一些系统上, 当你键入 `Ctrl-V` 时, 终端会等你输入另一个字符, 然后发送字符的字面量. 例如, 在我们禁用 `Ctrl-C` 前, 你可能可以按下 `Ctrl-V` 然后再按下 `Ctrl-C` 来输入字节 `3`. 我们可以使用 `IEXTEN` 标志位来关闭这个功能.
+
+关闭 `IEXTEN` 也可以修复 MacOS 中的 `Ctrl-O` 的问题. 因为 MacOS 的终端驱动被设置为丢弃控制字符.
+
+.第 11 步: kilo.c
+[%linenums, c, highlight=17]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(IXON);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`IEXTEN` 来自 `<termios.h>`. 这又是一个以 `I` 开头但是属于 `c_lflag` 字段的标志位.
+
+`Ctrl-V` 现在可以被读取为字节 `22`了. `Ctrl-O` 也可以被读取为字节 `15` 了.
+
+=== 修复 `Ctrl-M`
+
+如果你现在运行程序, 并在按住 `Ctrl` 的同时按一遍整个字母表, 你应该会看到除了 `M` 之外的所有字母. `Ctrl-M` 很奇怪: 当我们期望它被读入为 `13` 时, 它被读入为 `10`. 因为它是字母表中的第 `13` 个字母, 并且 `Ctrl-J` 已经产生了一个 `10`. 什么按键还产生 `10`? 回车键也会产生 `10`.
+
+事实证明, 终端正在帮助将用户输入的任何回车符(`13`, `\r`)转换为换行符 (`10`, `\n`). 让我们关闭这个功能.
+
+.第 12 步: kilo.c
+[%linenums, c, highlight=16]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(ICRNL | IXON);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`ICRNL` 来自 `<termios.h>`. `I` 代表"输入标志", `CR` 代表"回车", `NL` 代表"换行".
+
+现在 `Ctrl-M` 读入为字节 `13`(回车), 回车键也读入为 `13`.
+
+=== 关闭所有输出处理
+
+事实证明, 终端在输出端做了类似的翻译. 它将我们打印的每个换行符(`"\n"`)转换为回车符后跟换行符(`"\r\n"`). 终端需要这两个字符才能开始新的一行文本. 回车将光标移回到当前行的开头, 换行符将光标向下移动一行, 必要时滚动屏幕. (这两种截然不同的操作起源于打字机和电传打字机时代.)
+
+我们将通过关闭 `OPOST` 标志来关闭所有输出处理功能. 实际上, `"\n"` 到 `"\r\n"` 的翻译可能是唯一默认打开的输出处理功能.
+
+.第 13 步: kilo.c
+[%linenums, c, highlight=17]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(ICRNL | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`OPOST` 来自 `<termios.h>`. `O` 意味着它是一个输出标志, 我假设 `POST` 代表"输出后的处理".
+
+如果你现在运行程序, 你会看到我们正在打印的换行符只是将光标向下移动, 而不是向屏幕左侧移动. 为了解决这个问题, 让我们在语句中添加回车符 `printf()`.
+
+.第 14 步: kilo.c
+[%linenums, c, highlight=17..21]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int main() {
+  enableRawMode();
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1 && c != 'q') {
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+  }
+  return 0;
+}
+----
+
+从现在开始, 每当我们想开始新的一行时, 我们都必须写出完整的内容 `"\r\n"`.
+
+=== 杂项标志位
+
+让我们关闭更多的标志位.
+
+.第 15 步: kilo.c
+[%linenums, c, highlight="16,18"]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() { ... }
+----
+
+`BRKINT`, `INPCK`, `ISTRIP`, `CS8` 都来自 `<termios.h>`.
+
+此步骤可能不会对你产生任何可观察到的影响, 因为这些标志位要么已经关闭, 要么实际上并不适用于现代终端仿真器. 但曾几何时, (有人)认为关闭它们是启用"原始模式"的一部分, 因此我们在程序中继承了传统.
+
+据我所知:
+
+- `BRKINT` 打开时, 中断条件将导致向程序发送信号 `SIGINT`, 如同按下 `Ctrl-C`.
+- `INPCK` 启用奇偶校验, 这似乎不适用于现代终端仿真器.
+- `ISTRIP` 导致每个输入字节的第 `8` 位被剥离, 这意味着它将把它设置为 `0`. 这可能已经关闭.
+- `CS8` 不是标志, 它是具有多个位的位掩码, 我们使用按位或(`|`)运算符设置它, 这与我们要关闭的所有标志不同. 它将字符大小(`CS`)设置为每字节 `8` 位. 在我的系统上, 它已经设置好了.
+
+=== `read()` 的超时设置
+
+目前, `read()` 在返回之前将无限期地等待来自键盘的输入. 如果我们想在等待用户输入时在屏幕上做一些动画怎么办? 我们可以设置超时, `read()` 如果在一定时间内没有获得任何输入, 则返回.
+
+.第 16 步: kilo.c
+[%linenums, c, highlight="20..21,29..31,37"]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void disableRawMode() { ... }
+
+void enableRawMode() {
+  tcgetattr(STDIN_FILENO, &orig_termios);
+  atexit(disableRawMode);
+  struct termios raw = orig_termios;
+
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
+
+  tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw);
+}
+
+int main() {
+  enableRawMode();
+
+  while (1) {
+    char c = '\0';
+    read(STDIN_FILENO, &c, 1);
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+    if (c == 'q') break;
+  }
+
+  return 0;
+}
+----
+
+`VMIN` 和 `VTIME` 来自 `<termios.h>`. 它们是字段 `c_cc` 的索引, 代表"控制字符", 一个控制各种终端设置的字节数组.
+
+`VMIN` 设置 `read()` 返回前所需的最小输入字节数. 我们将其设置为 `0` 以便 `read()` 在有任何输入要读取时立即返回. `VTIME` 设置 `read()` 返回前等待的最长时间. 它以十分之一秒为单位, 因此我们将其设置为 `1/10` 秒, 即 `100` 毫秒. 如果 `read()` 超时, 它将返回 `0`, 这是有道理的, 因为它通常的返回值是读取的字节数.
+
+当你运行该程序时, 你可以看到 `read()` 超时的频率. 如果你不提供任何输入, 则 `read()` 返回时不设置 `c` 变量, 它会保留 `0` 值, 因此你会看到 `0` 秒被打印出来了. 如果你打字速度非常快, 你可以看到在每次按键后 `read()` 立即返回, 所以你不会每十分之一秒只能读取一次按键.
+
+如果你使用 **Windows** 上的 `Bash` , 你可能会看到它 `read()` 仍然会为了输入而阻塞. 它似乎并不关心 `VTIME` 的值. 幸运的是, 这不会对我们的文本编辑器产生太大影响, 因为无论如何我们基本上都会阻塞输入.
+
+=== 错误处理
+
+现在, `enableRawMode()` 让我们完全进入原始模式. 是时候通过添加一些错误处理来清理代码了.
+
+首先, 我们将添加一个 `die()` 打印错误消息并退出程序的函数.
+
+.第 17 步: kilo.c
+[%linenums, c, highlight=9..12]
+----
+#include <ctype.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void die(const char *s) {
+  perror(s);
+  exit(1);
+}
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int main() { ... }
+----
+
+`perror()` 来自 `<stdio.h>`, `exit()` 来自 `<stdlib.h>`.
+
+大多数执行失败的 `C` 库函数将设置 `errno` 这个全局变量来指示错误是什么. `perror()` 查看 `errno` 全局变量并为其打印一条描述性错误消息. 它还会在打印错误消息之前打印提供给它的字符串, 这意味着提供有关代码的哪一部分导致错误的上下文.
+
+打印出错误消息后, 我们退出程序, 退出状态为 `1`, 表示失败(与任何非零值一样).
+
+让我们检查我们的每个库调用是否失败, 并在失败时调用 `die()`.
+
+.第 18 步: kilo.c
+[%linenums, c, highlight="2,13..14,18,29,37"]
+----
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+struct termios orig_termios;
+
+void die(const char *s) { ... }
+
+void disableRawMode() {
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &orig_termios) == -1)
+    die("tcsetattr");
+}
+
+void enableRawMode() {
+  if (tcgetattr(STDIN_FILENO, &orig_termios) == -1) die("tcgetattr");
+  atexit(disableRawMode);
+
+  struct termios raw = orig_termios;
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
+
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+}
+
+int main() {
+  enableRawMode();
+
+  while (1) {
+    char c = '\0';
+    if (read(STDIN_FILENO, &c, 1) == -1 && errno != EAGAIN) die("read");
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+    if (c == 'q') break;
+  }
+
+  return 0;
+}
+----
+
+`errno` 和 `EAGAIN` 来自 `<errno.h>`
+
+`tcsetattr()`, `tcgetattr()`, 和 `read()` 在失败时都会返回 `-1` , 并设置 `errno` 值来指示错误.
+
+在 **Cygwin** 中, 当 `read()` 超时时它返回 `-1`, 也就是值为 `EAGAIN` 的 `errno`, 而不是像它应该的那样返回 `0`. 为了使其在 **Cygwin** 中工作, 我们不会将其视为 `EAGAIN` 错误.
+
+一个让 `tcgetattr()` 执行失败的简单方法是: 给你的程序一个文本文件或一个管道作为标准输入而不是你的终端作为标准输入. 要给它一个文件作为标准输入, 运行 `./kilo < kilo.c`. 要给它一个管道作为标准输入, 运行 `echo test | ./kilo`. 两者都应该导致 `tcgetattr()` 输出相同的错误, 例如 `Inappropriate ioctl for device`.
+
+=== 代码的各个部分
+
+本章关于进入原始模式的内容到此结束. 我们现在要做的最后一件事是将我们的代码分成几个部分. 这将使这些差异更短, 因为差异中未更改的每个部分都将折叠成一行.
+
+.第 19 步: kilo.c
+[%linenums, c, highlight="1,10,14,22"]
+----
+/*** includes ***/
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+/*** data ***/
+
+struct termios orig_termios;
+
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+/*** init ***/
+
+int main() { ... }
+----
+
+在下一章中, 我们将做一些更底层的终端输入/输出处理, 并使用它来绘制到屏幕并允许用户移动光标.

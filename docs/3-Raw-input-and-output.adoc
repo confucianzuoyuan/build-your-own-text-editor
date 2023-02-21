@@ -1,0 +1,1796 @@
+== 原始输入与输出
+
+=== 按 `Ctrl-Q` 退出
+
+上一章我们看到 `Ctrl` 键与字母键组合似乎映射到字节 `1-26`. 我们可以使用它来检测 `Ctrl` 组合键并将它们映射到我们编辑器中的不同操作. 我们从将 `Ctrl-Q` 映射到退出操作开始.
+
+.第 20 步: kilo.c
+[%linenums, c, highlight="10..12,29"]
+----
+/*** includes ***/
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <termios.h>
+#include <unistd.h>
+
+/*** defines ***/
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+/*** data ***/
+/*** terminal ***/
+/*** init ***/
+
+int main() {
+  enableRawMode();
+  while (1) {
+    char c = '\0';
+    if (read(STDIN_FILENO, &c, 1) == -1 && errno != EAGAIN) die("read");
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+    if (c == CTRL_KEY('q')) break;
+  }
+
+  return 0;
+}
+----
+
+宏定义 `CTRL_KEY` 将字符的值和二进制 `00011111` 进行按位与运算. (在 `C` 语言中, 我们通常使用十六进制指定位掩码, 因为 `C` 语言没有二进制字面量, 一旦你习惯了十六进制, 会觉得十六进制更加简洁和可读.) 换句话说, 它将字符的高 `3` 位设置为 `0`. 这反映了 `Ctrl` 键在终端中的作用: 它从你在 `Ctrl` 后面按下的任何键中剥离位 `5` 和 `6`, 并发送它. (按照惯例, 位编号从 `0` 开始.) `ASCII` 字符集似乎是故意这样设计的. (它也有类似的设计, 因此你可以设置和清除位 `5` 以在小写和大写之间切换.)
+
+=== 重构键盘输入
+
+让我们创建一个用于低级按键读取的函数, 以及另一个用于将按键映射到编辑器操作的函数. 此时我们也将停止打印按键.
+
+.第 21 步: kilo.c
+[%linenums, c, highlight="20..32,40"]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  return c;
+}
+
+/*** input ***/
+
+void editorProcessKeypress() {
+  char c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      exit(0);
+      break;
+  }
+}
+
+/*** init ***/
+
+int main() {
+  enableRawMode();
+  while (1) {
+    editorProcessKeypress();
+  }
+
+  return 0;
+}
+----
+
+`editorReadKey()` 的工作是等待一次按键, 然后返回. 稍后, 我们将扩展此函数以处理转义序列, 这涉及读取表示单个按键的多个字节, 就像方向键的情况一样.
+
+`editorProcessKeypress()` 等待按键, 然后处理它. 稍后, 它将各种 `Ctrl` 组合键和其他特殊键映射到不同的编辑器功能, 并将任何字母数字和其他可打印键的字符插入到正在编辑的文本中.
+
+请注意, `editorReadKey()` 属于 `/*** terminal ***/` 部分是因为它处理底层终端输入, 而 `editorProcessKeypress()` 属于新的 `/*** input ***/` 部分是因为它处理将键映射到更高级别的编辑器功能.
+
+现在我们已经大大简化了 `main()`, 我们将尽量保持这种状态.
+
+=== 清除屏幕
+
+我们将在每次按键后将编辑器的用户界面渲染到屏幕上. 让我们从清除屏幕开始.
+
+.第 22 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+/*** output ***/
+
+void editorRefreshScreen() {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+}
+
+/*** input ***/
+/*** init ***/
+
+int main() {
+  enableRawMode();
+
+  while (1) {
+    editorRefreshScreen();
+    editorProcessKeypress();
+  }
+
+  return 0;
+}
+----
+
+`write()` 和 `STDOUT_FILENO` 来自 `<unistd.h>` .
+
+`write()` 调用中的 `4` 表示我们正在将 `4` 个字节写出到终端. 第一个字节是转义字符 `\x1b`, 或者十进制 `27`. (试着记住 `\x1b`, 我们会经常使用它. )其他三个字节是 `[2J`.
+
+我们正在向终端写入一个转义序列. 转义序列始终以转义字符(`27`)开头, 后跟一个 `[` 字符. 转义序列指示终端执行各种文本格式化任务, 例如为文本着色、四处移动光标和清除部分屏幕.
+
+我们正在使用 `J` 命令来清除屏幕. 转义序列命令接收的参数位于命令之前. 在这种情况下, 参数是 `2`, 表示清除整个屏幕. `<esc>[1J` 会清除屏幕直到光标所在的位置, 命令 `<esc>[0J` 会清除从光标到屏幕末尾的屏幕. 此外, `0` 是 `J` 的默认参数, 因此命令 `<esc>[J` 本身也会清除从光标到末尾的屏幕.
+
+对于我们的文本编辑器, 我们将主要使用 `VT100` 转义序列, 现代终端仿真器广泛支持它. 有关每个转义序列的完整文档, 请参阅 `VT100` 用户指南.
+
+如果我们想要支持最大数量的终端, 我们可以使用 `ncurses` 库, 它使用 `terminfo` 数据库来确定终端的功能以及该特定终端使用的转义序列.
+
+=== 重新定位光标
+
+你可能会注意到 `<esc>[2J` 命令将光标留在了屏幕底部. 让我们将它重新定位在左上角, 以便我们准备好从上到下绘制编辑器界面.
+
+.第 23 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** output ***/
+
+void editorRefreshScreen() {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+这个转义序列只有 `3` 字节长, 并使用 `H` 命令定位光标. `H` 命令实际上有两个参数: 行号和光标所在的列号. 所以如果你有一个 `80 x 24` 大小的终端并且你希望光标在屏幕中央, 你可以使用命令 `<esc>[12;40H`. (多个参数由字符 `;` 分隔. )`H`的这两个默认参数恰好是 `1`, 因此我们可以将两个参数都省略, 它将光标定位在第一行和第一列, 就好像我们已经发送了命令 `<esc>[1;1H` 一样. (行和列的编号从 `1` 开始, 而不是 `0`. )
+
+=== 退出时清屏
+
+让我们在程序退出时清空屏幕并重新定位光标. 如果在渲染屏幕的过程中发生错误, 我们不希望屏幕上留下一堆垃圾, 我们也不希望光标恰好在那个点的任何地方打印错误.
+
+.第 24 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  perror(s);
+  exit(1);
+}
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+/*** output ***/
+/*** input ***/
+
+void editorProcessKeypress() {
+  char c = editorReadKey();
+
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+
+      exit(0);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+我们的程序有两个退出的地方, 我们希望在调用 `die()` 和用户按下 `Ctrl-Q` 退出时清除屏幕.
+
+在程序退出时我们可以使用 `atexit()` 来清除屏幕, 但是 `die()` 打印出来的错误消息会在打印后立即被擦除.
+
+=== 波浪线
+
+是时候开始画画了. 让我们在屏幕的左侧绘制一列波浪号(`~`), 就像 vim 所做的那样. 在我们的文本编辑器中, 我们将在正在编辑的文件末尾之后的任何行的开头绘制波浪号
+
+.第 25 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** output ***/
+
+void editorDrawRows() {
+  int y;
+  for (y = 0; y < 24; y++) {
+    write(STDOUT_FILENO, "~\r\n", 3);
+  }
+}
+
+void editorRefreshScreen() {
+  write(STDOUT_FILENO, "\x1b[2J", 4);
+  write(STDOUT_FILENO, "\x1b[H", 3);
+
+  editorDrawRows();
+
+  write(STDOUT_FILENO, "\x1b[H", 3);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+`editorDrawRows()` 将处理绘制正在编辑的文本缓冲区的每一行. 现在它在每一行中绘制波浪号, 这意味着该行不是文件的一部分并且不能包含任何文本.
+
+我们还不知道终端的大小, 所以我们不知道要绘制多少行. 现在我们只绘制 `24` 行.
+
+完成绘图后, 我们执行另一个 `<esc>[H` 转义序列以将光标重新定位回左上角.
+
+=== 全局状态
+
+我们的下一个目标是获取终端的大小, 以便我们知道在 `editorDrawRows()` 要绘制多少行. 但首先, 让我们设置一个包含编辑器状态的全局结构体, 我们将使用它来存储终端的宽度和高度. 现在, 让我们把整个 `orig_termios` 放入结构体中.
+
+.第 26 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+
+struct editorConfig {
+  struct termios orig_termios;
+};
+
+struct editorConfig E;
+
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() {
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &E.orig_termios) == -1)
+    die("tcsetattr");
+}
+
+void enableRawMode() {
+  if (tcgetattr(STDIN_FILENO, &E.orig_termios) == -1) die("tcgetattr");
+  atexit(disableRawMode);
+
+  struct termios raw = E.orig_termios;
+  raw.c_iflag &= ~(BRKINT | ICRNL | INPCK | ISTRIP | IXON);
+  raw.c_oflag &= ~(OPOST);
+  raw.c_cflag |= (CS8);
+  raw.c_lflag &= ~(ECHO | ICANON | IEXTEN | ISIG);
+  raw.c_cc[VMIN] = 0;
+  raw.c_cc[VTIME] = 1;
+
+  if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) die("tcsetattr");
+}
+
+char editorReadKey() { ... }
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+包含编辑器状态的全局变量名为 `E` . 我们必须用 `E.orig_termios` 替换所有出现 `orig_termios` 的地方.
+
+=== 控制窗口大小的简单办法
+
+在大多数系统上, 你应该能够通过简单地调用 `ioctl()` 并传入参数 `TIOCGWINSZ` 来获取终端的大小. (据我所知, 它代表 **T**erminal **IOC**tl(它本身代表 **I**nput/**O**utput **C**on**t**ro**l** ) **G**et**WIN**dow**S**i**Z**e. )
+
+.第 27 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
+
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    return -1;
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+`ioctl()`, `TIOCGWINSZ` 和 `struct winsize` 来自 `<sys/ioctl.h>`.
+
+成功时, `ioctl()` 会将终端的列数和行数放入给定的 `winsize` 结构体中. 失败时 `ioctl()` 返回 `-1`. 我们还检查以确保它返回的值不是 `0`, 因为显然这可能是错误的结果. 如果 `ioctl()` 以任何一种方式失败, 我们都会通过 `getWindowSize()` 返回 `-1` 来报告失败. 如果成功, 我们通过设置传递给函数的 `int` 引用将值传回. (这是在 C 中让函数返回多个值的常用方法. 它还允许你使用返回值来指示成功或失败. )
+
+现在让我们将 `screenrows` 和 `screencols` 添加到我们的全局编辑器状态, 并调用 `getWindowSize()` 以填充这些值.
+
+.第 28 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+
+struct editorConfig {
+  int screenrows;
+  int screencols;
+  struct termios orig_termios;
+};
+
+struct editorConfig E;
+
+/*** terminal ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+
+void initEditor() {
+  if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
+}
+
+int main() {
+  enableRawMode();
+  initEditor();
+
+  while (1) {
+    editorRefreshScreen();
+    editorProcessKeypress();
+  }
+
+  return 0;
+}
+----
+
+`initEditor()` 的工作将是初始化 `E` 结构体中的所有字段.
+
+现在我们准备好在屏幕上显示适当数量的波浪号.
+
+.第 29 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** output ***/
+
+void editorDrawRows() {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    write(STDOUT_FILENO, "~\r\n", 3);
+  }
+}
+
+void editorRefreshScreen() { ... }
+
+/*** input ***/
+/*** init ***/
+----
+
+=== 控制窗口大小的硬核方法
+
+`ioctl()` 不能保证能够在所有系统上请求窗口大小, 因此我们将提供一种获取窗口大小的备用方法.
+
+我们的策略是将光标定位在屏幕的右下角, 然后使用转义序列查询光标的位置. 这告诉我们屏幕上肯定有多少行和多少列.
+
+让我们从将光标移动到右下角开始.
+
+.第 30 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (1 || ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+    editorReadKey();
+    return -1;
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+正如你可能从代码中了解到的那样, 没有简单的"将光标移动到右下角"命令.
+
+我们一个接一个地发送两个转义序列. 命令 `C` 将光标向右移动, 命令 `B` 将光标向下移动. 参数表示将其向右或向下移动多少. 我们使用一个非常大的值 `999`, 它应该确保光标到达屏幕的右边缘和下边缘.
+
+命令 `C` 和 `B` 专门用于阻止光标越过屏幕边缘. 我们不使用 `<esc>[999;999H` 命令的原因是文档没有指定当你尝试将光标移出屏幕时会发生什么.
+
+请注意, 我们暂时将 `1 ||` 放在 `if` 的条件的最前面, 以便我们可以测试我们正在开发的这个回退分支.
+
+因为此时, 我们调用 `getWindowSize()` 时总是返回(意味着发生错误) `-1`, 所以我们调用 `editorReadKey()` 以便我们可以在程序调用 `die()` 和清除屏幕之前观察转义序列的结果. 当你运行程序时, 你应该看到光标位于屏幕的右下角, 然后当你按下一个键时, 你会看到在 `die()` 清除屏幕后打印的错误消息.
+
+接下来我们需要获取光标位置. 命令 `n` 可用于查询终端的状态信息. 我们可以给它一个参数 `6` 来询问光标位置. 然后我们可以从标准输入中读取回复. 让我们打印出标准输入中的每个字符, 看看回复是什么样子的.
+
+.第 31 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getCursorPosition(int *rows, int *cols) {
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+
+  printf("\r\n");
+  char c;
+  while (read(STDIN_FILENO, &c, 1) == 1) {
+    if (iscntrl(c)) {
+      printf("%d\r\n", c);
+    } else {
+      printf("%d ('%c')\r\n", c, c);
+    }
+  }
+
+  editorReadKey();
+
+  return -1;
+}
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+
+  if (1 || ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+回复是一个转义序列! 它是一个转义字符(`27`), 后跟一个 `[` 字符, 然后是实际的响应: `24;80R`, 或类似的.
+
+和以前一样, 我们插入了一个临时调用 `editorReadKey()` 可以让我们在退出时清除屏幕之前观察我们的调试输出.
+
+(注意: 如果你在 **Windows** 上使用 `Bash`, `read()` 不会超时, 所以你会陷入无限循环. 你必须在外部终止进程, 或者退出并重新打开命令提示符窗口.)
+
+我们将不得不解析这个响应. 但首先, 让我们将其读入缓冲区. 我们将继续读取字符, 直到我们到达字符 `R`.
+
+.第 32 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getCursorPosition(int *rows, int *cols) {
+  char buf[32];
+  unsigned int i = 0;
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
+    if (buf[i] == 'R') break;
+    i++;
+  }
+  buf[i] = '\0';
+  printf("\r\n&buf[1]: '%s'\r\n", &buf[1]);
+  editorReadKey();
+  return -1;
+}
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+当我们打印缓冲区时, 我们不想打印字符 `'\x1b'`, 因为终端会将其解释为转义序列而不会显示它. 所以我们通过传递 `&buf[1]` 给 `printf()` 来跳过 `buf` 的第一个字符. `printf()` 期望字符串以一个字节 `0` 结尾, 所以我们需要确保为 `buf` 分配 `'\0'`.
+
+如果你运行该程序, 你会看到我们的 `buf` 以 `<esc>[24;80` 的形式显示. 让我们使用 `sscanf()` 方法解析其中的两个数字:
+
+.第 33 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getCursorPosition(int *rows, int *cols) {
+  char buf[32];
+  unsigned int i = 0;
+  if (write(STDOUT_FILENO, "\x1b[6n", 4) != 4) return -1;
+  while (i < sizeof(buf) - 1) {
+    if (read(STDIN_FILENO, &buf[i], 1) != 1) break;
+    if (buf[i] == 'R') break;
+    i++;
+  }
+  buf[i] = '\0';
+  if (buf[0] != '\x1b' || buf[1] != '[') return -1;
+  if (sscanf(&buf[2], "%d;%d", rows, cols) != 2) return -1;
+  return 0;
+}
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+`sscanf()` 来自 `<stdio.h>`.
+
+首先, 我们确保它以转义序列响应. 然后我们传递给 `sscanf()` 一个指向 `buf` 的第三个字符的指针, 跳过 `'\x1b'` 和 `'['` 字符. 所以我们将字符串 `24;80` 传递给 `sscanf()`. 我们还向它传递了一个字符串 `%d;%d`, 该字符串告诉它解析两个由 `;` 分隔的整数, 并将值放入 `rows` 和 `cols` 变量中.
+
+我们获取窗口大小的备用方法现已完成. 你应该会看到 `editorDrawRows()` 针对你的终端高度打印出正确数量的波浪号.
+
+现在我们知道这行得通了, 让我们暂时删除我们放入 `if` 的条件 `1 ||`.
+
+.第 34 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) {
+  struct winsize ws;
+  if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) == -1 || ws.ws_col == 0) {
+    if (write(STDOUT_FILENO, "\x1b[999C\x1b[999B", 12) != 12) return -1;
+    return getCursorPosition(rows, cols);
+  } else {
+    *cols = ws.ws_col;
+    *rows = ws.ws_row;
+    return 0;
+  }
+}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+=== 最后一行
+
+也许你注意到屏幕的最后一行似乎没有波浪号. 那是因为我们代码中的一个小错误. 当我们打印最后一个波浪号时, 我们会像在任何其他行上一样打印一个 `"\r\n"`, 但这会导致终端滚动以便为新的空白行腾出空间. 当我们打印 `"\r\n"` 时, 让我们把最后一行作为一个例外.
+
+.第 35 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** output ***/
+
+void editorDrawRows() {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    write(STDOUT_FILENO, "~", 1);
+    if (y < E.screenrows - 1) {
+      write(STDOUT_FILENO, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen() { ... }
+
+/*** input ***/
+/*** init ***/
+----
+
+=== 添加缓冲区
+
+每次刷新屏幕时都调用一大堆 `write()` 并不是一个好主意. 最好做一个大的 `write()`, 以确保立即刷新整个屏幕. 否则, 在一堆 `write()` 调用之间可能会有不可预测的小停顿, 这会导致恼人的闪烁效果.
+
+我们想用将字符串追加到缓冲区的代码替换我们所有的 `write()` 调用, 然后在最后调用 `write()` 将缓冲区输出. 不幸的是, C 没有动态字符串, 因此我们将构建一种只支持追加操作的动态字符串类型.
+
+让我们开始创建一个新 `/*** append buffer ***/` 部分, 并在其下定义结构体 `abuf`.
+
+.第 36 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() { ... }
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+
+struct abuf {
+  char *b;
+  int len;
+};
+
+#define ABUF_INIT {NULL, 0}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+追加缓冲区由指向内存中缓冲区的指针和缓冲区长度组成. 我们定义一个代表空缓冲区的常量 `ABUF_INIT`. 这充当我们 `abuf` 类型的构造函数.
+
+接下来, 让我们定义 `abAppend()` 操作, 以及 `abFree()` 析构函数.
+
+.第 37 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+
+#include <ctype.h>
+#include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/ioctl.h>
+#include <termios.h>
+#include <unistd.h>
+
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+
+struct abuf { ... };
+
+#define ABUF_INIT {NULL, 0}
+
+void abAppend(struct abuf *ab, const char *s, int len) {
+  char *new = realloc(ab->b, ab->len + len);
+
+  if (new == NULL) return;
+  memcpy(&new[ab->len], s, len);
+  ab->b = new;
+  ab->len += len;
+}
+
+void abFree(struct abuf *ab) {
+  free(ab->b);
+}
+
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+`realloc()` 和 `free()` 来自 `<stdlib.h>`. `memcpy()` 来自 `<string.h>`.
+
+要将字符串 `s` 附加到 `abuf`, 我们要做的第一件事是确保分配足够的内存来保存新字符串. 我们要求 `realloc()` 给我们一个内存块, 它是当前字符串的大小加上我们要追加的字符串的大小. `realloc()` 将扩展我们已经分配的内存块的大小, 或者它将负责 `free()` 当前内存块并在其他地方分配一个足够大的新内存块来容纳我们的新字符串.
+
+然后我们使用 `memcpy()` 将字符串 `s` 复制到缓冲区中当前数据的结尾处, 并将 `abuf` 的指针和长度更新为新值.
+
+`abFree()` 是一个析构函数, 用于释放 `abuf` 所使用的动态内存.
+
+好的, 我们的 `abuf` 类型已经可以使用了.
+
+.第 38 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    abAppend(ab, "~", 1);
+    if (y < E.screenrows - 1) {
+      abAppend(ab, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen() {
+  struct abuf ab = ABUF_INIT;
+  abAppend(&ab, "\x1b[2J", 4);
+  abAppend(&ab, "\x1b[H", 3);
+  editorDrawRows(&ab);
+  abAppend(&ab, "\x1b[H", 3);
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+在 `editorRefreshScreen()` 中, 我们首先初始化一个新的 `abuf` 结构体实例 `ab`, 通过将 `ABUF_INIT` 赋值给 `ab`. 然后将每一个 `write(STDOUT_FILENO, ...)` 替换为 `abAppend(&ab, ...)`. 我们将 `ab` 传递给 `editorDrawRows()`, 所以它也可以使用 `abAppend()`. 最后, 我们调用 `write()` 将缓冲区中的内容写入标准输出, 然后释放 `abuf` 使用的内存.
+
+=== 重绘时隐藏光标
+
+我们现在要处理的令人讨厌的闪烁效果还有另一个可能的来源. 当终端绘制到屏幕上时, 光标可能会在屏幕中间某处显示一瞬间. 为了确保不会发生这种情况, 让我们在刷新屏幕之前隐藏光标, 并在刷新完成后立即再次显示它.
+
+.第 39 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) { ... }
+
+void editorRefreshScreen() {
+  struct abuf ab = ABUF_INIT;
+  abAppend(&ab, "\x1b[?25l", 6);
+  abAppend(&ab, "\x1b[2J", 4);
+  abAppend(&ab, "\x1b[H", 3);
+  editorDrawRows(&ab);
+  abAppend(&ab, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[?25h", 6);
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+我们使用转义序列告诉终端隐藏和显示光标. `h` 命令和 `l` 命令(设置模式、重置模式)用于打开和关闭各种终端功能或"模式". VT100 用户指南没有记录我们在上面使用的参数 `?25`. 看来光标隐藏/显示功能出现在后来的 VT 模型中. 所以一些终端可能不支持隐藏/显示光标, 但如果它们不支持, 那么它们将忽略那些转义序列, 这在这种情况下没什么大不了的.
+
+=== 一次清除一行
+
+与其在每次刷新之前清除整个屏幕, 不如在重绘时清除每一行似乎更理想. 让我们删除 `<esc>[2J` (清除整个屏幕)转义序列, 而是在我们绘制的每一行的末尾放置一个转义序列 `<esc>[K`.
+
+.第 40 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    abAppend(ab, "~", 1);
+    abAppend(ab, "\x1b[K", 3);
+    if (y < E.screenrows - 1) {
+      abAppend(ab, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen() {
+  struct abuf ab = ABUF_INIT;
+  abAppend(&ab, "\x1b[?25l", 6);
+  abAppend(&ab, "\x1b[2J", 4);
+  abAppend(&ab, "\x1b[H", 3);
+  editorDrawRows(&ab);
+  abAppend(&ab, "\x1b[H", 3);
+  abAppend(&ab, "\x1b[?25h", 6);
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+命令 `K` 擦除当前行的一部分. 它的参数类似于 `J` 命令的参数: `2` 擦除整行, `1` 擦除光标左侧的行部分, `0` 擦除光标右侧的行部分. `0` 是默认参数, 这就是我们想要的, 所以我们省去了参数, 只使用 `<esc>[K`.
+
+=== 欢迎留言
+
+也许是时候显示欢迎信息了. 让我们在屏幕下方三分之一处显示编辑器的名称和版本号.
+
+.第 41 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    if (y == E.screenrows / 3) {
+      char welcome[80];
+      int welcomelen = snprintf(welcome, sizeof(welcome),
+        "Kilo editor -- version %s", KILO_VERSION);
+      if (welcomelen > E.screencols) welcomelen = E.screencols;
+      abAppend(ab, welcome, welcomelen);
+    } else {
+      abAppend(ab, "~", 1);
+    }
+    abAppend(ab, "\x1b[K", 3);
+    if (y < E.screenrows - 1) {
+      abAppend(ab, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen() { ... }
+
+/*** input ***/
+/*** init ***/
+----
+
+`snprintf()` 来自 `<stdio.h>`.
+
+我们使用 `welcome` 缓冲区以及 `snprintf()` 将我们的字符串 `KILO_VERSION` 插入到欢迎消息中. 我们还截断了字符串的长度, 以防终端太小而无法容纳我们的欢迎消息.
+
+现在让我们把它居中.
+
+.第 42 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) {
+  int y;
+  for (y = 0; y < E.screenrows; y++) {
+    if (y == E.screenrows / 3) {
+      char welcome[80];
+      int welcomelen = snprintf(welcome, sizeof(welcome),
+        "Kilo editor -- version %s", KILO_VERSION);
+      if (welcomelen > E.screencols) welcomelen = E.screencols;
+      int padding = (E.screencols - welcomelen) / 2;
+      if (padding) {
+        abAppend(ab, "~", 1);
+        padding--;
+      }
+      while (padding--) abAppend(ab, " ", 1);
+      abAppend(ab, welcome, welcomelen);
+    } else {
+      abAppend(ab, "~", 1);
+    }
+    abAppend(ab, "\x1b[K", 3);
+    if (y < E.screenrows - 1) {
+      abAppend(ab, "\r\n", 2);
+    }
+  }
+}
+
+void editorRefreshScreen() { ... }
+
+/*** input ***/
+/*** init ***/
+----
+
+要使字符串居中, 请将屏幕宽度除以 `2`, 然后从中减去字符串长度的一半. 换句话说: `E.screencols/2 - welcomelen/2` 简化为 `(E.screencols - welcomelen) / 2`. 这告诉你应该从屏幕的左边缘多远开始打印字符串. 所以我们用空格字符填充那个空间, 除了第一个字符, 它应该是波浪号.
+
+=== 移动光标
+
+现在让我们关注输入. 我们希望用户能够移动光标. 第一步是跟踪光标在全局编辑器状态中的位置 `x` 和 `y`.
+
+.第 43 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+
+struct editorConfig {
+  int cx, cy;
+  int screenrows;
+  int screencols;
+  struct termios orig_termios;
+};
+
+struct editorConfig E;
+
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+
+void initEditor() {
+  E.cx = 0;
+  E.cy = 0;
+  if (getWindowSize(&E.screenrows, &E.screencols) == -1) die("getWindowSize");
+}
+
+int main() { ... }
+----
+
+`E.cx` 是光标(列)的水平坐标, `E.cy` 是垂直坐标(行). 我们将它们都初始化为 `0`, 因为我们希望光标从屏幕的左上角开始. (由于 C 语言使用从 `0` 开始的索引, 我们将尽可能使用 `0` 索引值.)
+
+现在让我们在 `editorRefreshScreen()` 中添加代码来将光标移动到存储在 `E.cx` 和 `E.cy` 中的位置.
+
+.第 44 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+
+void editorDrawRows(struct abuf *ab) { ... }
+
+void editorRefreshScreen() {
+  struct abuf ab = ABUF_INIT;
+
+  abAppend(&ab, "\x1b[?25l", 6);
+  abAppend(&ab, "\x1b[H", 3);
+
+  editorDrawRows(&ab);
+
+  char buf[32];
+  snprintf(buf, sizeof(buf), "\x1b[%d;%dH", E.cy + 1, E.cx + 1);
+  abAppend(&ab, buf, strlen(buf));
+
+  abAppend(&ab, "\x1b[?25h", 6);
+
+  write(STDOUT_FILENO, ab.b, ab.len);
+  abFree(&ab);
+}
+
+/*** input ***/
+/*** init ***/
+----
+
+`strlen()` 来自 `<string.h>`.
+
+我们将旧的 `H` 命令更改为带参数的 `H` 命令, 指定我们希望光标移动到的确切位置. (确保你删除了旧的 `H` 命令, 因为上面的差异很容易错过.)
+
+我们为 `E.cy` 和 `E.cx` 都加 `1`, 将 `0` 索引值转换为终端使用的 `1` 索引值.
+
+此时, 你可以尝试初始化E.cx或10插入E.cx++到主循环中, 以确认代码到目前为止是否按预期工作.
+
+接下来, 我们将允许用户使用 `w`, `a`, `s`, `d` 键移动光标. (如果你不熟悉将这些键用作箭头键: `w` 是向上箭头, `s` 是向下箭头, `a` 是左箭头, `d` 是右箭头.)
+
+.第 45 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(char key) {
+  switch (key) {
+    case 'a':
+      E.cx--;
+      break;
+    case 'd':
+      E.cx++;
+      break;
+    case 'w':
+      E.cy--;
+      break;
+    case 's':
+      E.cy++;
+      break;
+  }
+}
+
+void editorProcessKeypress() {
+  char c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case 'w':
+    case 's':
+    case 'a':
+    case 'd':
+      editorMoveCursor(c);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+现在你应该可以使用这些键移动光标了.
+
+=== 方向键
+
+现在我们有了一种映射按键来移动光标的方法, 让我们用箭头键替换按键`w`, `a`, `s`, `d`. 上一章我们看到按下箭头键会发送多个字节作为我们程序的输入. 这些字节采用转义序列的形式, 以 `'\x1b'`, `'['` 开头, 后面跟着 `'A'`, `'B'` 或 `'C'`, `'D'`. 具体取决于按下的是四个箭头键中的哪一个. 让我们修改 `editorReadKey()` 来将这种形式的转义序列读取为单个按键.
+
+.第 46 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      switch (seq[1]) {
+        case 'A': return 'w';
+        case 'B': return 's';
+        case 'C': return 'd';
+        case 'D': return 'a';
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+如果我们读取一个转义字符, 我们会立即将两个字节读入缓冲区 `seq`. 如果其中任何一个读取超时( `0.1` 秒后), 那么我们假设用户只是按下了键 `Escape` 并返回了它. 否则我们查看转义序列是否是箭头键转义序列. 如果是, 我们现在只返回相应的字符 `w`, `a`, `s`, `d`. 如果它不是我们识别的转义序列, 我们就返回转义字符.
+
+我们将 `seq` 缓冲区设为 `3` 个字节长, 因为我们将来会处理更长的转义序列.
+
+我们基本上将箭头键别名为 `wasd` 按键. 这使箭头键立即起作用, 但键 `wasd` 仍然映射到 `editorMoveCursor()` 函数. 我们想要的是 `editorReadKey()` 为每个箭头键返回特殊值, 让我们识别按下了特定的箭头键.
+
+让我们首先用常量 `ARROW_UP`, `ARROW_LEFT`, `ARROW_DOWN` 和 `ARROW_RIGHT` 分别替换 `wasd` 按键.
+
+.第 47 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 'a',
+  ARROW_RIGHT = 'd',
+  ARROW_UP = 'w',
+  ARROW_DOWN = 's'
+};
+
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+char editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      switch (seq[1]) {
+        case 'A': return ARROW_UP;
+        case 'B': return ARROW_DOWN;
+        case 'C': return ARROW_RIGHT;
+        case 'D': return ARROW_LEFT;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(char key) {
+  switch (key) {
+    case ARROW_LEFT:
+      E.cx--;
+      break;
+    case ARROW_RIGHT:
+      E.cx++;
+      break;
+    case ARROW_UP:
+      E.cy--;
+      break;
+    case ARROW_DOWN:
+      E.cy++;
+      break;
+  }
+}
+
+void editorProcessKeypress() {
+  char c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      editorMoveCursor(c);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+现在我们只需要在 `editorKey` 枚举中选择一个与 `wasd` 按键不冲突的箭头键表示. 我们会给它们一个超出 `char` 范围的大整数值, 这样它们就不会与任何普通按键发生冲突. 我们还必须将所有存储按键的变量更改为类型 `int` 而不是 `char`.
+
+.第 48 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN
+};
+
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      switch (seq[1]) {
+        case 'A': return ARROW_UP;
+        case 'B': return ARROW_DOWN;
+        case 'C': return ARROW_RIGHT;
+        case 'D': return ARROW_LEFT;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(int key) {
+  switch (key) {
+    case ARROW_LEFT:
+      E.cx--;
+      break;
+    case ARROW_RIGHT:
+      E.cx++;
+      break;
+    case ARROW_UP:
+      E.cy--;
+      break;
+    case ARROW_DOWN:
+      E.cy++;
+      break;
+  }
+}
+
+void editorProcessKeypress() {
+  int c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      editorMoveCursor(c);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+通过将枚举中的第一个常量设置为 `1000`, 其余常量将获得递增的值 `1001`, `1002`, `1003`, 依此类推.
+
+我们的箭头键处理代码到此结束. 此时, 尝试在程序运行时手动输入转义序列会很有趣. 尝试按 `Escape` 键, `[` 键, 然后非常快的按照顺序按下 `Shift+C`, 你可能会看到你的按键被解释为按下右箭头键. 你必须非常快才能做到这一点, 所以你可能想暂时调整 `enableRawMode()` 中的值 `VTIME`, 让它更容易. (这也有助于了解按下 `Ctrl-[` 按下键 `Escape` 相同, 原因与按下 `Ctrl-M` 和按下 `Enter` 相同的原因是一样的: `Ctrl` 清除你键入的字符的第 `6` 位和第 `7` 位.)
+
+=== 防止将光标移出屏幕
+
+目前, 你可以使 `E.cx` 和 `E.cy` 的值变成负数, 或者越过屏幕的右边缘和下边缘. 让我们在 `editorMoveCursor()` 中进行一些边界检查来防止这种情况发生.
+
+.第 49 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(int key) {
+  switch (key) {
+    case ARROW_LEFT:
+      if (E.cx != 0) {
+        E.cx--;
+      }
+      break;
+    case ARROW_RIGHT:
+      if (E.cx != E.screencols - 1) {
+        E.cx++;
+      }
+      break;
+    case ARROW_UP:
+      if (E.cy != 0) {
+        E.cy--;
+      }
+      break;
+    case ARROW_DOWN:
+      if (E.cy != E.screenrows - 1) {
+        E.cy++;
+      }
+      break;
+  }
+}
+
+void editorProcessKeypress() { ... }
+
+/*** init ***/
+----
+
+=== Page Up 和 Page Down
+
+为了完成我们的底层终端代码, 我们需要检测一些使用转义序列的特殊按键, 就像箭头键一样. 我们将从 `Page Up` 和 `Page Down` 开始. 按下 `Page Up` 发送 `<esc>[5~`, 按下 `Page Down` 发送 `<esc>[6~`.
+
+.第 50 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  PAGE_UP,
+  PAGE_DOWN
+};
+
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      if (seq[1] >= '0' && seq[1] <= '9') {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+        if (seq[2] == '~') {
+          switch (seq[1]) {
+            case '5': return PAGE_UP;
+            case '6': return PAGE_DOWN;
+          }
+        }
+      } else {
+        switch (seq[1]) {
+          case 'A': return ARROW_UP;
+          case 'B': return ARROW_DOWN;
+          case 'C': return ARROW_RIGHT;
+          case 'D': return ARROW_LEFT;
+        }
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+现在你明白为什么我们声明 `seq` 存储 `3` 个字节了. 如果 `[` 后面的字节是一个数字, 我们期望读取的另一个字节是一个 `~`. 然后我们测试数字字节以查看它是 `5` 还是 `6`.
+
+让我们用 `Page Up` 和 `Page Down` 做些什么. 现在, 我们将让它们将光标移动到屏幕顶部或屏幕底部.
+
+.第 51 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(int key) { ... }
+
+void editorProcessKeypress() {
+  int c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case PAGE_UP:
+    case PAGE_DOWN:
+      {
+        int times = E.screenrows;
+        while (times--)
+          editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+      }
+      break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      editorMoveCursor(c);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+我们用那对大括号创建一个代码块, 这样我们就可以声明变量 `times` 了. (你不能直接在 `switch` 语句中声明变量.) 我们模拟用户按下 `↑` 或 `↓` 键足够多次以移动到屏幕的顶部或底部. 以这种方式实现 `Page Up` 和 `Page Down` 将使我们以后在实现滚动时更容易.
+
+如果你使用的是带按键 `Fn` 的笔记本电脑, 则可以按 `Fn+↑` 和 `Fn+↓` 来模拟按 `Page Up` 和 `Page Down` 键.
+
+=== Home 和 End
+
+现在让我们实现 `Home` 和 `End` 键. 与前面的键一样, 这些键也发送转义序列. 与之前的按键不同的地方在于, 这些按键可以发送许多不同的转义序列, 具体取决于你的操作系统或终端仿真器. 按下 `Home` 键可能发送的转义序列有: `<esc>[1~`, `<esc>[7~`, `<esc>[H` 以及 `<esc>OH`. 按下 `End` 键可能发送的转义序列有: `<esc>[4~`, `<esc>[8~`, `<esc>[F` 以及 `<esc>OF`. 让我们处理这些情况.
+
+.第 52 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
+};
+
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      if (seq[1] >= '0' && seq[1] <= '9') {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+        if (seq[2] == '~') {
+          switch (seq[1]) {
+            case '1': return HOME_KEY;
+            case '4': return END_KEY;
+            case '5': return PAGE_UP;
+            case '6': return PAGE_DOWN;
+            case '7': return HOME_KEY;
+            case '8': return END_KEY;
+          }
+        }
+      } else {
+        switch (seq[1]) {
+          case 'A': return ARROW_UP;
+          case 'B': return ARROW_DOWN;
+          case 'C': return ARROW_RIGHT;
+          case 'D': return ARROW_LEFT;
+          case 'H': return HOME_KEY;
+          case 'F': return END_KEY;
+        }
+      }
+    } else if (seq[0] == 'O') {
+      switch (seq[1]) {
+        case 'H': return HOME_KEY;
+        case 'F': return END_KEY;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+现在让我们用 `Home` 和 `End` 按键做点什么. 现在, 我们将让它们将光标移动到屏幕的左边缘或右边缘.
+
+.第 53 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+/*** data ***/
+/*** terminal ***/
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+
+void editorMoveCursor(int key) { ... }
+
+void editorProcessKeypress() {
+  int c = editorReadKey();
+  switch (c) {
+    case CTRL_KEY('q'):
+      write(STDOUT_FILENO, "\x1b[2J", 4);
+      write(STDOUT_FILENO, "\x1b[H", 3);
+      exit(0);
+      break;
+    case HOME_KEY:
+      E.cx = 0;
+      break;
+    case END_KEY:
+      E.cx = E.screencols - 1;
+      break;
+    case PAGE_UP:
+    case PAGE_DOWN:
+      {
+        int times = E.screenrows;
+        while (times--)
+          editorMoveCursor(c == PAGE_UP ? ARROW_UP : ARROW_DOWN);
+      }
+      break;
+    case ARROW_UP:
+    case ARROW_DOWN:
+    case ARROW_LEFT:
+    case ARROW_RIGHT:
+      editorMoveCursor(c);
+      break;
+  }
+}
+
+/*** init ***/
+----
+
+如果你使用的是带 `Fn` 键的笔记本电脑, 则可以用 `Fn+←` 和 `Fn+→` 来模拟 `Home` 和 `End` 键.
+
+=== Delete
+
+最后, 让我们检测 `Delete` 按键何时被按下. 它只是发送转义序列 `<esc>[3~`, 因此很容易添加到我们的 `switch` 语句中. 我们暂时不会用这个按键做任何事情.
+
+.第 54 步: kilo.c
+[%linenums, c]
+----
+/*** includes ***/
+/*** defines ***/
+
+#define KILO_VERSION "0.0.1"
+
+#define CTRL_KEY(k) ((k) & 0x1f)
+
+enum editorKey {
+  ARROW_LEFT = 1000,
+  ARROW_RIGHT,
+  ARROW_UP,
+  ARROW_DOWN,
+  DEL_KEY,
+  HOME_KEY,
+  END_KEY,
+  PAGE_UP,
+  PAGE_DOWN
+};
+
+/*** data ***/
+/*** terminal ***/
+
+void die(const char *s) { ... }
+
+void disableRawMode() { ... }
+
+void enableRawMode() { ... }
+
+int editorReadKey() {
+  int nread;
+  char c;
+  while ((nread = read(STDIN_FILENO, &c, 1)) != 1) {
+    if (nread == -1 && errno != EAGAIN) die("read");
+  }
+  if (c == '\x1b') {
+    char seq[3];
+    if (read(STDIN_FILENO, &seq[0], 1) != 1) return '\x1b';
+    if (read(STDIN_FILENO, &seq[1], 1) != 1) return '\x1b';
+    if (seq[0] == '[') {
+      if (seq[1] >= '0' && seq[1] <= '9') {
+        if (read(STDIN_FILENO, &seq[2], 1) != 1) return '\x1b';
+        if (seq[2] == '~') {
+          switch (seq[1]) {
+            case '1': return HOME_KEY;
+            case '3': return DEL_KEY;
+            case '4': return END_KEY;
+            case '5': return PAGE_UP;
+            case '6': return PAGE_DOWN;
+            case '7': return HOME_KEY;
+            case '8': return END_KEY;
+          }
+        }
+      } else {
+        switch (seq[1]) {
+          case 'A': return ARROW_UP;
+          case 'B': return ARROW_DOWN;
+          case 'C': return ARROW_RIGHT;
+          case 'D': return ARROW_LEFT;
+          case 'H': return HOME_KEY;
+          case 'F': return END_KEY;
+        }
+      }
+    } else if (seq[0] == 'O') {
+      switch (seq[1]) {
+        case 'H': return HOME_KEY;
+        case 'F': return END_KEY;
+      }
+    }
+    return '\x1b';
+  } else {
+    return c;
+  }
+}
+
+int getCursorPosition(int *rows, int *cols) { ... }
+
+int getWindowSize(int *rows, int *cols) { ... }
+
+/*** append buffer ***/
+/*** output ***/
+/*** input ***/
+/*** init ***/
+----
+
+如果你使用的是带 `Fn` 键的笔记本电脑, 则可以按 `Fn+退格键` 来模拟按下 `Delete` 键.
+
+在下一章中, 我们将让我们的程序显示文本文件, 完成垂直和水平滚动以及状态栏.
